@@ -108,6 +108,14 @@ class AcessoInput(BaseModel):
 class PixCopiadoInput(BaseModel):
     id: str
 
+
+class GerarInput(BaseModel):
+    documento: str
+    cidade: str = ""
+    valor: float
+    meses: List[str] = []
+    session_id: str = ""
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -378,6 +386,52 @@ async def public_consulta(data: ConsultaInput, request: Request):
         "device": fat["device"],
     })
     await notify_telegram("pix_gerado", f"🧾 <b>PIX gerado</b>\nDoc: {documento}\nValor: R$ {fat['valor']:.2f}\nCidade: {data.cidade or '-'}")
+    return {"fatura": {k: v for k, v in fat.items() if k != "_id"}, "pix_code": pix_code}
+
+
+@api.post("/public/gerar")
+async def public_gerar(data: GerarInput, request: Request):
+    s = await db.settings.find_one({"_id": "main"}) or {}
+    chave = (s.get("chave_pix") or "").strip()
+    if not chave:
+        raise HTTPException(status_code=503, detail="Pagamento indisponível no momento. Tente mais tarde.")
+
+    documento = re.sub(r"\D", "", data.documento or "")
+    if len(documento) not in (11, 14):
+        raise HTTPException(status_code=400, detail="Documento inválido.")
+
+    valor = round(float(data.valor or 0), 2)
+    if valor <= 0:
+        raise HTTPException(status_code=400, detail="Valor inválido.")
+
+    ua = request.headers.get("user-agent", "")
+    pix_code = gen_pix_brcode(chave, s.get("nome_beneficiario", ""), s.get("cidade", ""), valor, documento)
+    fat = {
+        "id": str(uuid.uuid4()),
+        "session_id": (data.session_id or "")[:64],
+        "documento": documento,
+        "valor": valor,
+        "meses": data.meses or [],
+        "status": "pendente",
+        "qr_copiado": True,
+        "pix_copiado": False,
+        "cidade": data.cidade or "",
+        "device": parse_device(ua),
+        "navegador": parse_browser(ua),
+        "pix_code": pix_code,
+        "origem": "site_publico",
+        "created_at": now_iso(),
+    }
+    await db.faturas.insert_one(fat)
+    await add_activity({
+        "type": "pix_gerado",
+        "title": f"PIX gerado · Doc {documento}",
+        "subtitle": data.cidade or "Site público",
+        "valor": valor,
+        "documento": documento,
+        "device": fat["device"],
+    })
+    await notify_telegram("pix_gerado", f"🧾 <b>PIX gerado</b>\nDoc: {documento}\nValor: R$ {valor:.2f}\nCidade: {data.cidade or '-'}")
     return {"fatura": {k: v for k, v in fat.items() if k != "_id"}, "pix_code": pix_code}
 
 
